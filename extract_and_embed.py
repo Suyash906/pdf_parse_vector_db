@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify
 from pymilvus import DataType, MilvusClient
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
+import hashlib
 
 # Load API keys from .env
 load_dotenv()
@@ -33,7 +34,7 @@ def connect_to_milvus_db():
         return None
 
 # Create collection using the schema method
-def create_milvus_collection_v2(milvus_client, collection_name="case_files"):
+def create_milvus_collection(milvus_client, collection_name="case_files"):
     if milvus_client.has_collection(collection_name):
         app.logger.info(f"ℹ️ Collection '{collection_name}' already exists.")
         return
@@ -43,6 +44,10 @@ def create_milvus_collection_v2(milvus_client, collection_name="case_files"):
     schema.add_field("chunk_id", DataType.INT64, is_primary=True, description="Unique chunk ID")
     schema.add_field("text", DataType.VARCHAR, max_length=65535, description="Document chunk text")
     schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=1536, description="OpenAI embedding")
+    schema.add_field("file_name", DataType.VARCHAR, max_length=1000, description="Name of the uploaded file")
+    schema.add_field("file_id", DataType.VARCHAR, max_length=1000, description="SHA256 hash of the file name")
+    schema.add_field("court_level", DataType.INT8,  description="level of the court")
+    
 
     # Define index
     index_params = milvus_client.prepare_index_params()
@@ -77,14 +82,17 @@ def get_embedding(text, model="text-embedding-ada-002"):
     return response.data[0].embedding
 
 # Process PDF and insert into Milvus
-def process_pdf_to_milvus(pdf_path, milvus_client, collection_name="case_files"):
+def process_pdf_to_milvus(pdf_path, milvus_client, collection_name="case_files", original_filename=None, court_level=None):
     # Ensure collection exists
-    create_milvus_collection_v2(milvus_client, collection_name)
+    create_milvus_collection(milvus_client, collection_name)
 
     # Extract text from PDF
     doc = fitz.open(pdf_path)
     full_text = "\n".join([page.get_text() for page in doc])
     chunks = chunk_text(full_text)
+
+    file_name = original_filename or os.path.basename(pdf_path)
+    file_id = hashlib.sha256(file_name.encode('utf-8')).hexdigest()
     
     # Process chunks and prepare rows for insertion
     rows = []
@@ -95,7 +103,10 @@ def process_pdf_to_milvus(pdf_path, milvus_client, collection_name="case_files")
                 # Create individual row as dictionary with proper field types
                 row = {
                     "text": chunk,  # String value for varchar field
-                    "embedding": emb  # List of floats for vector field
+                    "embedding": emb,  # List of floats for vector field
+                    "file_name": file_name,
+                    "file_id": file_id,
+                    "court_level": court_level
                 }
                 rows.append(row)
             else:
@@ -141,7 +152,6 @@ def ingest_legal_document():
         return jsonify({"error": "No file part in the request"}), 400
     
     file = request.files['file']
-    
     # If user does not select file, browser may submit an empty file
     if file.filename == '':
         return jsonify({"error": "No file selected"}), 400
@@ -152,6 +162,12 @@ def ingest_legal_document():
     
     # Get optional collection name
     collection_name = request.form.get('collection', 'case_files')
+
+    court_level = request.form.get("court_level")
+    try:
+        court_level = int(court_level)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid or missing court_level. It must be an integer."}), 400
     
     try:
         # Save the file temporarily
@@ -160,8 +176,14 @@ def ingest_legal_document():
         file.save(pdf_path)
         
         # Process the PDF
-        chunks_inserted = process_pdf_to_milvus(pdf_path, milvus_client, collection_name)
-        
+        chunks_inserted = process_pdf_to_milvus(
+            pdf_path,
+            milvus_client,
+            collection_name,
+            original_filename=file.filename,
+            court_level=court_level
+        )
+
         # Clean up
         os.remove(pdf_path)
         os.rmdir(temp_dir)
