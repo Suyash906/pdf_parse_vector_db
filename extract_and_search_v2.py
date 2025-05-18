@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # Import Flask-CORS
 import fitz  # PyMuPDF
 from openai import OpenAI
 import os
@@ -19,6 +20,9 @@ MILVUS_TOKEN = os.getenv("MILVUS_TOKEN")
 # Initialize Flask app
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Limit to 16MB
+
+# Add CORS support
+CORS(app, resources={r"/api/*": {"origins": "*"}})  # Allow all origins for /api/ routes
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
